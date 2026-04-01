@@ -97,14 +97,16 @@ class UserLocation(BaseModel):
 class StoreResult(BaseModel):
     """Tienda concreta devuelta por Google Maps."""
 
-    place_id:      str
-    name:          str
-    address:       str
-    lat:           float
-    lng:           float
-    distance_m:    int
-    hours_unknown: bool
-    type:          StoreType
+    place_id:           str
+    name:               str
+    address:            str
+    lat:                float
+    lng:                float
+    distance_m:         int
+    hours_unknown:      bool
+    type:               StoreType
+    has_address:        bool       # True si vicinity tiene contenido útil; obligatorio, sin default
+    user_ratings_total: int  = 0  # scoring secundario; 0 si la API no lo informa
 
 
 class SearchStatus(BaseModel):

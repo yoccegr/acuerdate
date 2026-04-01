@@ -16,9 +16,6 @@ logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Tabla de traducción: tipo interno → parámetros de Google Maps Places API
-#
-# Cada entrada define los parámetros que se envían a Nearby Search.
-# "type" es el tipo de lugar de Google; "keyword" refina dentro de ese tipo.
 # ---------------------------------------------------------------------------
 
 STORE_TYPE_MAP: dict[str, dict[str, str]] = {
@@ -38,20 +35,65 @@ STORE_TYPE_MAP: dict[str, dict[str, str]] = {
     },
 }
 
+# ---------------------------------------------------------------------------
+# Tipos de Google aceptables por tipo de tienda interno
+#
+# Todos los tipos tienen filtro explícito. Un resultado se acepta si su
+# lista `types` contiene al menos uno de los valores del set.
+#
+# supermercado: solo "supermarket" y "grocery_or_supermarket". "food" excluido
+#   porque la API lo asigna a restaurantes, food trucks y mercados de barrio.
+#
+# farmacia: solo "pharmacy" y "drugstore". "health" excluido porque spas
+#   y gimnasios también lo llevan.
+# ---------------------------------------------------------------------------
+
+_ACCEPTED_GOOGLE_TYPES: dict[str, set[str]] = {
+    "supermercado": {
+        "supermarket",
+        "grocery_or_supermarket",
+    },
+    "farmacia": {
+        "pharmacy",
+        "drugstore",
+    },
+    "botilleria": {
+        "liquor_store",
+        "bar",
+        "convenience_store",
+    },
+    "panaderia": {
+        "bakery",
+        "cafe",
+        "food",
+    },
+}
+
 _NEARBY_SEARCH_URL = (
     "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
 )
 
-# Número máximo de alternativas incluidas en la salida (especificación §3.2)
 _MAX_ALTERNATIVES = 2
+
+# ---------------------------------------------------------------------------
+# Parámetros de ranking — heurísticas iniciales del MVP, ajustables en Fase 4
+#
+# _DISTANCE_TIE_THRESHOLD_M: diferencia máxima en metros para que dos
+#   candidatos compitan por calidad en lugar de por distancia.
+#   100m ≈ un bloque en Santiago. Solo tiendas en el mismo entorno inmediato
+#   entran en competencia de calidad.
+#
+# _MIN_RATINGS_ESTABLISHED: mínimo de reseñas para considerar un lugar
+#   con historial suficiente. No implica que el lugar sea malo si está por
+#   debajo — solo tiene menos evidencia disponible en Maps.
+# ---------------------------------------------------------------------------
+
+_DISTANCE_TIE_THRESHOLD_M = 100
+_MIN_RATINGS_ESTABLISHED  = 5
 
 
 # ---------------------------------------------------------------------------
 # Función principal
-#
-# api_key y timeout se reciben como parámetros explícitos.
-# No se leen desde settings aquí — esa lectura ocurre en RequestHandler,
-# donde settings ya fue inicializado durante el arranque del servicio.
 # ---------------------------------------------------------------------------
 
 def search(
@@ -65,18 +107,14 @@ def search(
     Traduce un SearchProfile en una tienda concreta usando la Places API.
 
     Flujo (congelado en especificación):
-      1. Buscar tipo(s) primary en radio configurado.
-      2. Si sin resultados y existe fallback distinto → buscar fallback.
-      3. Si aún sin resultados → duplicar radio y repetir (una sola vez).
-      4. Buscar optional de forma independiente.
+      1. Buscar tipo primary en radio configurado.
+      2. Sin resultados y existe fallback distinto → buscar fallback.
+      3. Aún sin resultados → duplicar radio, reintentar una sola vez.
+      4. Buscar optional independientemente.
       5. Construir MapsResult.
 
-    Parámetros:
-      profile       — salida de CoverageEngine.
-      location      — coordenadas del usuario en el momento del request.
-      radius_meters — radio inicial de búsqueda en metros.
-      api_key       — Google Maps API key, leída de settings en RequestHandler.
-      timeout       — segundos antes de lanzar MapsTimeoutError.
+    api_key y timeout se reciben como parámetros explícitos — no se leen
+    desde settings aquí. Esa lectura ocurre en RequestHandler al arranque.
     """
     status = _new_status(radius_meters)
 
@@ -87,7 +125,7 @@ def search(
     alternatives:   list[StoreResult]  = []
     radius_used = radius_meters
 
-    # ── Paso 1: buscar primary ───────────────────────────────────────────────
+    # ── Paso 1: primary ──────────────────────────────────────────────────────
     if primary_type:
         candidates = search_by_type(
             primary_type, location, radius_meters, api_key, timeout
@@ -103,7 +141,7 @@ def search(
                 primary_type, radius_meters,
             )
 
-    # ── Paso 2: fallback si primary falló ────────────────────────────────────
+    # ── Paso 2: fallback ─────────────────────────────────────────────────────
     if recommendation is None and fallback_type and fallback_type != primary_type:
         status["fallback_used"] = True
         candidates = search_by_type(
@@ -152,7 +190,7 @@ def search(
                 else:
                     status["fallback_found"] = True
 
-    # ── Paso 4: buscar optional (siempre, independiente del primary) ─────────
+    # ── Paso 4: optional ─────────────────────────────────────────────────────
     optional_results: list[StoreResult] = []
     for opt_type in profile.optional:
         candidates = search_by_type(opt_type, location, radius_used, api_key, timeout)
@@ -181,9 +219,8 @@ def search_by_type(
     timeout:    int,
 ) -> list[StoreResult]:
     """
-    Consulta Google Maps Nearby Search para un tipo de tienda.
-    Devuelve lista de StoreResult ordenada por distancia al usuario.
-    Lista vacía si no hay resultados o si ocurre un error no crítico.
+    Consulta Nearby Search, aplica filtros de calidad y rankea candidatos.
+    Devuelve lista vacía si no hay resultados válidos.
     """
     params = _build_params(store_type, location, radius, api_key)
 
@@ -224,28 +261,117 @@ def search_by_type(
     places = data.get("results", [])
     stores = [_parse_place(place, store_type, location) for place in places]
     valid  = [s for s in stores if s is not None]
-    valid.sort(key=lambda s: s.distance_m)
 
+    if not valid:
+        logger.info(
+            "Maps '%s' radio=%dm → 0 válidos (de %d crudos)",
+            store_type, radius, len(places),
+        )
+        return []
+
+    ranked = _rank_candidates(valid)
     logger.info(
-        "Maps '%s' radio=%dm → %d resultado(s)",
-        store_type, radius, len(valid),
+        "Maps '%s' radio=%dm → %d resultado(s) válido(s)",
+        store_type, radius, len(ranked),
     )
-    return valid
+    return ranked
 
 
 # ---------------------------------------------------------------------------
-# Selección de la más cercana y separación de alternativas
+# Filtros de calidad
+# ---------------------------------------------------------------------------
+
+def _passes_hard_filters(
+    place:      dict[str, Any],
+    store_type: str,
+) -> tuple[bool, str]:
+    """
+    Filtros duros. Devuelve (pasa, motivo_de_rechazo).
+
+      1. place_id ausente o vacío           → resultado inválido.
+      2. name ausente o vacío               → no presentable al usuario.
+      3. business_status CLOSED_PERMANENTLY → negocio inexistente.
+      4. open_now: False explícito          → cerrado ahora.
+      5. Tipo de Google incompatible        → contaminación por búsqueda.
+    """
+    if not place.get("place_id", "").strip():
+        return False, "sin place_id"
+
+    if not place.get("name", "").strip():
+        return False, "nombre vacío"
+
+    if place.get("business_status") == "CLOSED_PERMANENTLY":
+        return False, "CLOSED_PERMANENTLY"
+
+    if (place.get("opening_hours") or {}).get("open_now") is False:
+        return False, "cerrado ahora"
+
+    accepted = _ACCEPTED_GOOGLE_TYPES.get(store_type, set())
+    if accepted:
+        result_types = set(place.get("types", []))
+        if not result_types.intersection(accepted):
+            return False, f"tipos incompatibles: {result_types}"
+
+    return True, ""
+
+
+# ---------------------------------------------------------------------------
+# Scoring y ranking
+# ---------------------------------------------------------------------------
+
+def _quality_score(store: StoreResult) -> tuple:
+    """
+    Tupla de desempate por calidad — no contiene distance_m.
+
+    Prioridades dentro de la zona de empate (menor = mejor):
+      1. Dirección útil (has_address).
+      2. Reputación establecida (>= _MIN_RATINGS_ESTABLISHED reseñas).
+      3. Volumen de reseñas.
+    """
+    established = store.user_ratings_total >= _MIN_RATINGS_ESTABLISHED
+    return (
+        0 if store.has_address else 1,
+        0 if established else 1,
+        -store.user_ratings_total,
+    )
+
+
+def _rank_candidates(stores: list[StoreResult]) -> list[StoreResult]:
+    """
+    Ordena candidatos con dos regímenes explícitos:
+
+    Fuera de la zona de empate (diferencia > _DISTANCE_TIE_THRESHOLD_M
+    respecto al más cercano): la distancia decide sola.
+
+    Dentro de la zona de empate (diferencia <= _DISTANCE_TIE_THRESHOLD_M):
+    la calidad decide — dirección > reputación > volumen de reseñas.
+    La distancia no aparece en el score de estos candidatos.
+    """
+    if len(stores) <= 1:
+        return list(stores)
+
+    min_dist = min(s.distance_m for s in stores)
+
+    in_tie:  list[StoreResult] = []
+    outside: list[StoreResult] = []
+
+    for s in stores:
+        if s.distance_m - min_dist <= _DISTANCE_TIE_THRESHOLD_M:
+            in_tie.append(s)
+        else:
+            outside.append(s)
+
+    return sorted(in_tie, key=_quality_score) + sorted(outside, key=lambda s: s.distance_m)
+
+
+# ---------------------------------------------------------------------------
+# Selección y separación
 # ---------------------------------------------------------------------------
 
 def select_nearest(
     stores:   list[StoreResult],
     location: UserLocation,  # noqa: ARG001 — firma pública según especificación
 ) -> StoreResult | None:
-    """
-    Devuelve la tienda más cercana de la lista.
-    La lista ya viene ordenada por distancia desde search_by_type.
-    location se mantiene en la firma por contrato de la especificación.
-    """
     return stores[0] if stores else None
 
 
@@ -264,11 +390,7 @@ def _split_candidates(
 
 def approximate_distance(loc1: UserLocation, loc2: UserLocation) -> int:
     """
-    Distancia aproximada en metros entre dos coordenadas geográficas.
-
-    Usa la fórmula de Haversine: precisa para distancias cortas (< 50 km),
-    tiene en cuenta la curvatura de la Tierra.
-
+    Distancia aproximada en metros usando Haversine.
     No es distancia de ruta real — no considera calles ni tráfico.
     """
     R    = 6_371_000
@@ -276,7 +398,6 @@ def approximate_distance(loc1: UserLocation, loc2: UserLocation) -> int:
     lat2 = math.radians(loc2.lat)
     dlat = math.radians(loc2.lat - loc1.lat)
     dlng = math.radians(loc2.lng - loc1.lng)
-
     a = (
         math.sin(dlat / 2) ** 2
         + math.cos(lat1) * math.cos(lat2) * math.sin(dlng / 2) ** 2
@@ -289,10 +410,6 @@ def approximate_distance(loc1: UserLocation, loc2: UserLocation) -> int:
 # ---------------------------------------------------------------------------
 
 def translate_type(store_type: str) -> dict[str, str]:
-    """
-    Devuelve los parámetros de Places API para un tipo de tienda interno.
-    Lanza KeyError si el tipo no está en STORE_TYPE_MAP.
-    """
     if store_type not in STORE_TYPE_MAP:
         raise KeyError(
             f"Tipo de tienda desconocido: '{store_type}'. "
@@ -325,40 +442,54 @@ def _parse_place(
     user_location: UserLocation,
 ) -> StoreResult | None:
     """
-    Convierte un resultado crudo de la Places API en un StoreResult.
-    Devuelve None si faltan campos obligatorios o la tienda está cerrada.
+    Convierte un resultado crudo en StoreResult.
+    Aplica filtros duros y deriva has_address desde vicinity.
+    has_address es obligatorio en StoreResult — siempre se calcula aquí.
     """
+    passes, reason = _passes_hard_filters(place, store_type)
+    if not passes:
+        logger.debug(
+            "Lugar descartado (%s): '%s'",
+            reason, place.get("name", "sin nombre"),
+        )
+        return None
+
     try:
         geometry  = place["geometry"]["location"]
         store_lat = geometry["lat"]
         store_lng = geometry["lng"]
     except (KeyError, TypeError):
         logger.warning(
-            "Resultado de Maps sin geometry.location — ignorado: %s",
+            "Resultado sin geometry.location — ignorado: %s",
             place.get("name", "sin nombre"),
         )
         return None
 
-    store_location = UserLocation(lat=store_lat, lng=store_lng)
-    distance       = approximate_distance(user_location, store_location)
+    distance = approximate_distance(
+        user_location,
+        UserLocation(lat=store_lat, lng=store_lng),
+    )
 
-    opening_hours = place.get("opening_hours", {})
-    open_now      = opening_hours.get("open_now")
+    raw_vicinity = place.get("vicinity") or ""
+    address      = raw_vicinity.strip()
+    has_address  = bool(address)  # derivado de los datos de la API, nunca asumido
+
+    open_now      = (place.get("opening_hours") or {}).get("open_now")
     hours_unknown = open_now is None
 
-    # Si la API confirma explícitamente que está cerrada, no se incluye
-    if open_now is False:
-        return None
+    user_ratings_total = place.get("user_ratings_total") or 0
 
     return StoreResult(
-        place_id=      place.get("place_id", ""),
-        name=          place.get("name", ""),
-        address=       place.get("vicinity", ""),
-        lat=           store_lat,
-        lng=           store_lng,
-        distance_m=    distance,
-        hours_unknown= hours_unknown,
-        type=          store_type,
+        place_id=           place["place_id"],
+        name=               place["name"].strip(),
+        address=            address,
+        lat=                store_lat,
+        lng=                store_lng,
+        distance_m=         distance,
+        hours_unknown=      hours_unknown,
+        type=               store_type,
+        has_address=        has_address,
+        user_ratings_total= user_ratings_total,
     )
 
 
@@ -386,10 +517,7 @@ def _handle_http_status_error(
         ) from error
     if code == 429:
         raise MapsQuotaError("Cuota de Google Maps API excedida.") from error
-    logger.error(
-        "HTTP %d consultando Maps para tipo='%s': %s",
-        code, store_type, error,
-    )
+    logger.error("HTTP %d consultando Maps tipo='%s': %s", code, store_type, error)
 
 
 def _handle_api_status(api_status: str, store_type: str) -> None:
@@ -401,7 +529,7 @@ def _handle_api_status(api_status: str, store_type: str) -> None:
     if api_status == "OVER_QUERY_LIMIT":
         raise MapsQuotaError("Cuota de Google Maps API excedida (OVER_QUERY_LIMIT).")
     logger.warning(
-        "Maps API status inesperado '%s' para tipo='%s' — tratado como sin resultados",
+        "Maps API status inesperado '%s' tipo='%s' — sin resultados",
         api_status, store_type,
     )
 
@@ -424,14 +552,11 @@ def _new_status(radius_meters: int) -> dict:
 class MapsTimeoutError(Exception):
     """El request a Google Maps no respondió dentro del timeout configurado."""
 
-
 class MapsAuthError(Exception):
     """API key inválida o sin permisos para usar Places API."""
 
-
 class MapsQuotaError(Exception):
     """Cuota de la Google Maps API excedida."""
-
 
 class MapsUnavailableError(Exception):
     """No se pudo establecer conexión con Google Maps."""
