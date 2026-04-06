@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../features/recommendation/presentation/pages/recommendation_page.dart';
 
 class AcuerdateApp extends StatelessWidget {
   const AcuerdateApp({super.key});
@@ -8,11 +9,7 @@ class AcuerdateApp extends StatelessWidget {
     return MaterialApp(
       title: 'Acuérdate',
       debugShowCheckedModeBanner: false,
-      home: const Scaffold(
-        body: Center(
-          child: Text('Acuérdate'),
-        ),
-      ),
+      home: const RecommendationPage(),
     );
   }
 }
