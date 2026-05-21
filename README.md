@@ -1,10 +1,10 @@
-# 🛒 Acuérdate!
+# Acuérdate!
 
 Acuérdate! es una app que ayuda a decidir automáticamente **dónde comprar una lista de productos**, minimizando esfuerzo y cantidad de paradas.
 
 ---
 
-## 🎯 Problema que resuelve
+## Problema que resuelve
 
 Las personas suelen:
 - olvidar comprar cosas
@@ -15,7 +15,7 @@ Acuérdate! elimina esa fricción.
 
 ---
 
-## 💡 Solución
+## Solución
 
 El usuario escribe su lista y el sistema:
 
@@ -27,7 +27,7 @@ El usuario escribe su lista y el sistema:
 
 ---
 
-## 🧠 Cómo funciona (arquitectura)
+## Cómo funciona (arquitectura)
 
 Input usuario
    ↓
@@ -41,7 +41,7 @@ Recomendación final
 
 ---
 
-## 📦 Estructura del proyecto
+## Estructura del proyecto
 
 acuerdate/
 ├── docs/        → definición del producto y roadmap
@@ -52,7 +52,7 @@ acuerdate/
 
 ---
 
-## ⚙️ Estado actual
+## Estado actual
 
 - ✔️ Diccionario de productos definido
 - ✔️ Clasificador de texto implementado (especificación)
@@ -63,7 +63,7 @@ acuerdate/
 
 ---
 
-## 🚀 Roadmap
+## Roadmap
 
 - Fase 0: Definición del sistema ✔️
 - Fase 1: Clasificador ✔️
@@ -77,9 +77,9 @@ acuerdate/
 
 ---
 
-## 🧠 Principios del producto
+## Principios del producto
 
-- El usuario no decide → el sistema decide
+- El usuario no necesita decidir → el sistema decide
 - Minimizar número de paradas
 - Priorizar simplicidad
 - Funcionar sin historial
@@ -87,7 +87,7 @@ acuerdate/
 
 ---
 
-## 🎯 Objetivo final
+## Objetivo final
 
 Construir un sistema que:
 
@@ -95,7 +95,7 @@ Decida por ti dónde comprar, en el momento correcto, con el menor esfuerzo posi
 
 ---
 
-## 🛠️ Tecnologías (planificadas)
+## Tecnologías (planificadas)
 
 - Frontend: Flutter
 - Backend: (por definir)
@@ -104,13 +104,13 @@ Decida por ti dónde comprar, en el momento correcto, con el menor esfuerzo posi
 
 ---
 
-## 👩‍💻 Autora
+## Autora
 
 Proyecto desarrollado por Yocce González  
-Ingeniera en Automatización & futura Data Scientist 🚀
+Ingeniera en Automatización & futura Data Scientist 
 
 ---
 
-## 📌 Estado del proyecto
+## Estado del proyecto
 
 En desarrollo activo — MVP en construcción
